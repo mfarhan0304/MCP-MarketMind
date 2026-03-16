@@ -14,7 +14,7 @@ Run:
 
 from typing import Annotated, Literal
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from pydantic import Field
 
 import marketmind.tools as tools
@@ -110,17 +110,22 @@ async def generate_research_report(
         str,
         Field(description="Stock ticker to research, e.g. NVDA"),
     ],
-) -> ResearchReport:
+    ctx: Context,
+) -> str:
     """
-    Generate a comprehensive AI research report for a stock.
+    Generate a streaming AI research report for a stock.
 
-    Automatically fetches the latest quote, 1-month price history, RSI(14),
-    and recent news headlines, then synthesises them into a structured report
-    with price analysis, momentum commentary, news context, and a directional
-    outlook (bullish / neutral / bearish).
+    Fetches the latest quote, RSI(14), price history, and recent news
+    concurrently, then streams a narrative analyst report token-by-token via
+    MCP progress notifications — so the client sees output as it is written
+    rather than waiting for the full response.
+
+    Returns the complete report text when finished.
     """
-    # Gather all data concurrently where possible, tolerate partial failures.
     import asyncio
+
+    # Step 1: gather all market data concurrently (tolerates partial failures)
+    await ctx.report_progress(0, 3, "Gathering market data…")
 
     quote, history, rsi, headlines = await asyncio.gather(
         tools.get_stock_quote(GetStockQuoteInput(symbol=symbol)),
@@ -130,15 +135,24 @@ async def generate_research_report(
         return_exceptions=True,
     )
 
-    return await tools.generate_research_report(
-        GenerateReportInput(
-            symbol=symbol,
-            quote=quote if not isinstance(quote, Exception) else None,
-            history=history if not isinstance(history, Exception) else None,
-            rsi=rsi if not isinstance(rsi, Exception) else None,
-            headlines=headlines if not isinstance(headlines, Exception) else [],
-        )
+    inp = GenerateReportInput(
+        symbol=symbol,
+        quote=quote if not isinstance(quote, Exception) else None,
+        history=history if not isinstance(history, Exception) else None,
+        rsi=rsi if not isinstance(rsi, Exception) else None,
+        headlines=headlines if not isinstance(headlines, Exception) else [],
     )
+
+    # Step 2: stream synthesis — each token is pushed to the client immediately
+    await ctx.report_progress(1, 3, "Generating report…")
+
+    full_report = ""
+    async for chunk in tools.stream_research_report(inp):
+        full_report += chunk
+        await ctx.report_progress(2, 3, chunk)
+
+    await ctx.report_progress(3, 3, "Done.")
+    return full_report
 
 
 def main() -> None:

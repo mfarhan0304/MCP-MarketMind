@@ -15,14 +15,18 @@ from pydantic import ValidationError
 
 from marketmind.schemas import (
     ComputeRSIInput,
+    GenerateReportInput,
     GetHistoricalPricesInput,
     GetStockQuoteInput,
+    RSIResult,
+    StockQuote,
 )
 from marketmind.tools import (
     _rsi,
     compute_rsi,
     get_historical_prices,
     get_stock_quote,
+    stream_research_report,
 )
 
 
@@ -249,3 +253,101 @@ class TestRSICalculation:
         close = self._make_close([100.0, 101.0, 102.0])  # only 3 points, period=14
         with pytest.raises(ValueError, match="data points"):
             _rsi(close, 14)
+
+
+# ===========================================================================
+# stream_research_report
+# ===========================================================================
+
+
+class TestStreamResearchReport:
+
+    @pytest.fixture
+    def fake_inp(self):
+        from datetime import datetime, timezone
+        return GenerateReportInput(
+            symbol="NVDA",
+            quote=StockQuote(
+                symbol="NVDA", price=924.18, change_pct=2.51,
+                volume=51_000_000, timestamp=datetime.now(timezone.utc),
+            ),
+            rsi=RSIResult(symbol="NVDA", rsi=64.2, signal="neutral", period=14),
+            headlines=["NVDA beats estimates", "Data centre demand strong"],
+        )
+
+    # --- Business -----------------------------------------------------------
+
+    async def test_yields_non_empty_chunks(self, fake_inp, mocker):
+        """Stream must yield at least one non-empty string chunk."""
+        chunks = ["NVIDIA ", "is ", "bullish."]
+        mock_stream = _make_mock_stream(chunks)
+
+        with _patch_openai(mocker, mock_stream):
+            result = [c async for c in stream_research_report(fake_inp)]
+
+        assert len(result) > 0
+        assert all(isinstance(c, str) and len(c) > 0 for c in result)
+
+    async def test_assembled_text_matches_chunks(self, fake_inp, mocker):
+        """Joining all chunks must produce the complete report."""
+        chunks = ["NVIDIA ", "shows ", "strong ", "momentum."]
+        mock_stream = _make_mock_stream(chunks)
+
+        with _patch_openai(mocker, mock_stream):
+            result = [c async for c in stream_research_report(fake_inp)]
+
+        assert "".join(result) == "NVIDIA shows strong momentum."
+
+    # --- Convenience --------------------------------------------------------
+
+    async def test_empty_headlines_does_not_error(self, mocker):
+        """stream_research_report handles missing optional fields gracefully."""
+        from datetime import datetime, timezone
+        inp = GenerateReportInput(symbol="AAPL")
+        chunks = ["Apple ", "is ", "neutral."]
+        mock_stream = _make_mock_stream(chunks)
+
+        with _patch_openai(mocker, mock_stream):
+            result = [c async for c in stream_research_report(inp)]
+
+        assert "".join(result) == "Apple is neutral."
+
+    # --- Security -----------------------------------------------------------
+
+    async def test_none_delta_chunks_are_filtered(self, fake_inp, mocker):
+        """OpenAI sometimes sends chunks with None content — must be skipped."""
+        chunks_with_none = ["NVIDIA ", None, "is ", None, "bullish."]
+        mock_stream = _make_mock_stream(chunks_with_none)
+
+        with _patch_openai(mocker, mock_stream):
+            result = [c async for c in stream_research_report(fake_inp)]
+
+        assert None not in result
+        assert "".join(result) == "NVIDIA is bullish."
+
+
+# ---------------------------------------------------------------------------
+# Helpers for streaming tests
+# ---------------------------------------------------------------------------
+
+def _make_mock_stream(chunks: list):
+    """Build an async iterable of fake OpenAI stream chunks."""
+    from unittest.mock import MagicMock
+
+    async def _gen():
+        for content in chunks:
+            chunk = MagicMock()
+            chunk.choices[0].delta.content = content
+            yield chunk
+
+    mock_stream = MagicMock()
+    mock_stream.__aiter__ = lambda self: _gen()
+    return mock_stream
+
+
+def _patch_openai(mocker, mock_stream):
+    """Patch openai.AsyncOpenAI so chat.completions.create returns mock_stream."""
+    from unittest.mock import AsyncMock, MagicMock
+    mock_client = MagicMock()
+    mock_client.chat.completions.create = AsyncMock(return_value=mock_stream)
+    return mocker.patch("openai.AsyncOpenAI", return_value=mock_client)

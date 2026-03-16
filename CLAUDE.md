@@ -32,7 +32,7 @@ uv run python -m marketmind.workflow NVDA
 uv run pytest
 
 # Inspect MCP tools interactively
-uv run fastmcp dev src/marketmind/server.py
+uv run fastmcp inspect src/marketmind/server.py
 ```
 
 ## Project Structure

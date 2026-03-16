@@ -186,6 +186,63 @@ async def fetch_headlines_safe(symbol: str, max_items: int = 5) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+async def stream_research_report(inp: GenerateReportInput):
+    """
+    Async generator that streams a narrative research report token-by-token
+    from OpenAI.
+
+    Used by the MCP server to push progress notifications to the client as the
+    report is being written — so the user sees output immediately instead of
+    waiting for the full response.
+
+    Yields str chunks. The caller is responsible for assembling the full text.
+    """
+    import openai
+
+    from marketmind.config import settings
+
+    client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
+
+    price_line = (
+        f"${inp.quote.price} ({inp.quote.change_pct:+.2f}% today)"
+        if inp.quote
+        else "unavailable"
+    )
+    rsi_line = (
+        f"{inp.rsi.rsi:.1f} — {inp.rsi.signal}" if inp.rsi else "unavailable"
+    )
+    headlines_block = (
+        "\n".join(f"  • {h}" for h in inp.headlines)
+        if inp.headlines
+        else "  None available"
+    )
+
+    prompt = f"""You are a senior equity analyst. Write a concise, professional
+research note for {inp.symbol} using the data below. Use plain prose — no JSON,
+no markdown headers, no bullet points.
+
+Data:
+- Price: {price_line}
+- RSI(14): {rsi_line}
+- Recent headlines:
+{headlines_block}
+
+Structure: 1) price action, 2) momentum, 3) news context, 4) outlook.
+Keep it under 150 words."""
+
+    stream = await client.chat.completions.create(
+        model="gpt-4o",
+        max_tokens=300,
+        stream=True,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    async for chunk in stream:
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta
+
+
 async def generate_research_report(inp: GenerateReportInput) -> ResearchReport:
     # Lazy import so that missing API key only fails when this tool is called.
     import openai
